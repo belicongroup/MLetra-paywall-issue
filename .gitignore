@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Web build
+dist/
+dist-ssr/
+.vite/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Logs & local
+*.log
+npm-debug.log*
+*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+
+# Android / Gradle (Capacitor)
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+*.iml
+local.properties
