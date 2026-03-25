@@ -10,26 +10,72 @@ import { useAuth } from "../../src/contexts/AuthContext";
 import { getPlatform, isCapacitorEnvironment } from "../../src/lib/capacitor";
 import appPackage from "../package.json";
 
-type SubscriptionStatus = Awaited<ReturnType<typeof subscriptionService.checkSubscriptionStatus>>;
+type SubscriptionStatus = Awaited<
+  ReturnType<typeof subscriptionService.checkSubscriptionStatus>
+>;
 
 const MOCK_FLAG_KEY = "mletras_payment_test";
 const MOCK_ACTIVE_KEY = "mletras_mock_subscription_active";
 const MOCK_PRODUCT_KEY = "mletras_mock_subscription_productId";
 const MOCK_TX_KEY = "mletras_mock_subscription_transactionId";
 const MOCK_PURCHASED_AT_KEY = "mletras_mock_subscription_purchased_at";
+const PRICE_CACHE_KEY = "mletras_price_cache";
+const PRICE_CACHE_TIME_KEY = "mletras_price_cache_time";
+const PRICE_CACHE_TTL = 1000 * 60 * 10; // 10 minutos
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
 
+const getCachedPrices = () => {
+  try {
+    const raw = sessionStorage.getItem(PRICE_CACHE_KEY);
+    const rawTime = sessionStorage.getItem(PRICE_CACHE_TIME_KEY);
+
+    if (!raw || !rawTime) return null;
+
+    const cacheTime = Number(rawTime);
+    const isExpired = Date.now() - cacheTime > PRICE_CACHE_TTL;
+
+    if (isExpired) {
+      sessionStorage.removeItem(PRICE_CACHE_KEY);
+      sessionStorage.removeItem(PRICE_CACHE_TIME_KEY);
+      return null;
+    }
+
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const setCachedPrices = (prices: {
+  monthlyPrice: string;
+  yearlyPrice: string;
+}) => {
+  try {
+    sessionStorage.setItem(PRICE_CACHE_KEY, JSON.stringify(prices));
+    sessionStorage.setItem(PRICE_CACHE_TIME_KEY, String(Date.now()));
+  } catch {}
+};
+
 export default function App() {
   const { isAuthenticated, user } = useAuth();
-  const { isPro, isLoading: proLoading, subscriptionStatus, refreshProStatus } = useProStatus();
-  const [selectedProduct, setSelectedProduct] = useState<string>(SUBSCRIPTION_PRODUCT_ID_YEARLY);
+  const {
+    isPro,
+    isLoading: proLoading,
+    subscriptionStatus,
+    refreshProStatus,
+  } = useProStatus();
+  const [selectedProduct, setSelectedProduct] = useState<string>(
+    SUBSCRIPTION_PRODUCT_ID_YEARLY,
+  );
   const [busy, setBusy] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  const [statusText, setStatusText] = useState("Checking subscription status...");
+  const [statusText, setStatusText] = useState(
+    "Checking subscription status...",
+  );
   const [mockMode, setMockMode] = useState(false);
   const [monthlyPrice, setMonthlyPrice] = useState("...");
   const [yearlyPrice, setYearlyPrice] = useState("...");
@@ -41,7 +87,7 @@ export default function App() {
       inCapacitor: isCapacitorEnvironment(),
       platform: getPlatform(),
     }),
-    []
+    [],
   );
 
   const setWebMockMode = (enabled: boolean) => {
@@ -70,11 +116,27 @@ export default function App() {
   const loadPrices = async () => {
     setPricesLoading(true);
     try {
-      const monthly = await subscriptionService.getProductInfo(SUBSCRIPTION_PRODUCT_ID_MONTHLY);
-      const yearly = await subscriptionService.getProductInfo(SUBSCRIPTION_PRODUCT_ID_YEARLY);
-      setMonthlyPrice(monthly?.price ?? "N/A");
-      setYearlyPrice(yearly?.price ?? "N/A");
+      setStatusText("Loading products...");
+      const [monthly, yearly] = await Promise.all([
+        subscriptionService.getProductInfo(SUBSCRIPTION_PRODUCT_ID_MONTHLY),
+        subscriptionService.getProductInfo(SUBSCRIPTION_PRODUCT_ID_YEARLY),
+      ]);
+
+      const nextMonthlyPrice = monthly?.price ?? "N/A";
+      const nextYearlyPrice = yearly?.price ?? "N/A";
+
+      setMonthlyPrice(nextMonthlyPrice);
+      setYearlyPrice(nextYearlyPrice);
+
+      if (nextMonthlyPrice !== "N/A" && nextYearlyPrice !== "N/A") {
+        setCachedPrices({
+          monthlyPrice: nextMonthlyPrice,
+          yearlyPrice: nextYearlyPrice,
+        });
+      }
     } catch (error) {
+      setMonthlyPrice("N/A");
+      setYearlyPrice("N/A");
       setStatusText(`Price load failed: ${toErrorMessage(error)}`);
     } finally {
       setPricesLoading(false);
@@ -101,7 +163,15 @@ export default function App() {
         setMockMode(false);
       }
     }
-    loadPrices();
+    const cached = getCachedPrices();
+    if (cached) {
+      setMonthlyPrice(cached.monthlyPrice);
+      setYearlyPrice(cached.yearlyPrice);
+      setStatusText("Prices loaded from cache");
+    } else {
+      loadPrices();
+    }
+
     refreshStatus(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -112,7 +182,9 @@ export default function App() {
       return;
     }
     if (isPro) {
-      setStatusText(`Pro active${subscriptionStatus?.productId ? ` (${subscriptionStatus.productId})` : ""}`);
+      setStatusText(
+        `Pro active${subscriptionStatus?.productId ? ` (${subscriptionStatus.productId})` : ""}`,
+      );
     } else {
       setStatusText("Pro not active");
     }
@@ -122,7 +194,8 @@ export default function App() {
     setBusy(true);
     setStatusText("Processing purchase...");
     try {
-      const result = await subscriptionService.purchaseSubscription(selectedProduct);
+      const result =
+        await subscriptionService.purchaseSubscription(selectedProduct);
       if (!result.success) {
         setStatusText("Purchase did not complete");
         return;
@@ -193,13 +266,19 @@ export default function App() {
           rawActiveSubscriptions,
         },
         supportFlags: {
-          verifyEndpointTokenConfigured: Boolean(import.meta.env?.VITE_VERIFY_ENDPOINT_TOKEN),
+          verifyEndpointTokenConfigured: Boolean(
+            import.meta.env?.VITE_VERIFY_ENDPOINT_TOKEN,
+          ),
           webMockFlag: localStorage.getItem(MOCK_FLAG_KEY),
           cachedProStatus: localStorage.getItem("cached_pro_status"),
           mockSubscriptionActive: localStorage.getItem(MOCK_ACTIVE_KEY),
           mockSubscriptionProductId: localStorage.getItem(MOCK_PRODUCT_KEY),
-          mockSubscriptionTransactionIdPresent: Boolean(localStorage.getItem(MOCK_TX_KEY)),
-          mockSubscriptionPurchasedAt: localStorage.getItem(MOCK_PURCHASED_AT_KEY),
+          mockSubscriptionTransactionIdPresent: Boolean(
+            localStorage.getItem(MOCK_TX_KEY),
+          ),
+          mockSubscriptionPurchasedAt: localStorage.getItem(
+            MOCK_PURCHASED_AT_KEY,
+          ),
         },
       };
 
@@ -211,20 +290,35 @@ export default function App() {
     }
   };
 
+  const pricesReady =
+    !pricesLoading &&
+    monthlyPrice !== "..." &&
+    yearlyPrice !== "..." &&
+    monthlyPrice !== "N/A" &&
+    yearlyPrice !== "N/A";
+
   return (
     <main className="screen">
       <div className="paywall">
         <header className="hero">
           <p className="heroLabel">M Letras Payment Test</p>
           <h1>Unlock MLetras Pro</h1>
-          <p className="heroText">Unlimited notes, unlimited folders, premium lyrics flow.</p>
+          <p className="heroText">
+            Unlimited notes, unlimited folders, premium lyrics flow.
+          </p>
         </header>
 
         <section className="statusCard">
           <div className="statusRow">
             <span className={`statusDot ${isPro ? "active" : ""}`} />
             <div>
-              <p className="statusTitle">{isPro ? "Pro active" : proLoading ? "Checking status..." : "Free plan active"}</p>
+              <p className="statusTitle">
+                {isPro
+                  ? "Pro active"
+                  : proLoading
+                    ? "Checking status..."
+                    : "Free plan active"}
+              </p>
               <p className="statusSub">{statusText}</p>
             </div>
           </div>
@@ -236,50 +330,82 @@ export default function App() {
           <div>Priority support</div>
           <div>Premium updates</div>
         </section>
-
-        <section className="plans">
-          <button
-            className={`plan ${selectedProduct === SUBSCRIPTION_PRODUCT_ID_MONTHLY ? "selected" : ""}`}
-            onClick={() => setSelectedProduct(SUBSCRIPTION_PRODUCT_ID_MONTHLY)}
-            disabled={busy || restoring || pricesLoading}
-          >
-            <div className="planTitle">Monthly</div>
-            <div className="planPrice">{monthlyPrice}</div>
-          </button>
-          <button
-            className={`plan ${selectedProduct === SUBSCRIPTION_PRODUCT_ID_YEARLY ? "selected" : ""}`}
-            onClick={() => setSelectedProduct(SUBSCRIPTION_PRODUCT_ID_YEARLY)}
-            disabled={busy || restoring || pricesLoading}
-          >
-            <div className="badge">Best Value</div>
-            <div className="planTitle">Yearly</div>
-            <div className="planPrice">{yearlyPrice}</div>
-          </button>
-        </section>
+        {!pricesReady ? (
+          <section className="plans">
+            <div className="plan skeleton" />
+            <div className="plan skeleton" />
+          </section>
+        ) : (
+          <section className="plans">
+            <button
+              className={`plan ${selectedProduct === SUBSCRIPTION_PRODUCT_ID_MONTHLY ? "selected" : ""}`}
+              onClick={() =>
+                setSelectedProduct(SUBSCRIPTION_PRODUCT_ID_MONTHLY)
+              }
+              disabled={busy || restoring || pricesLoading}
+            >
+              <div className="planTitle">Monthly</div>
+              <div className="planPrice">{monthlyPrice}</div>
+            </button>
+            <button
+              className={`plan ${selectedProduct === SUBSCRIPTION_PRODUCT_ID_YEARLY ? "selected" : ""}`}
+              onClick={() => setSelectedProduct(SUBSCRIPTION_PRODUCT_ID_YEARLY)}
+              disabled={busy || restoring || pricesLoading}
+            >
+              <div className="badge">Best Value</div>
+              <div className="planTitle">Yearly</div>
+              <div className="planPrice">{yearlyPrice}</div>
+            </button>
+          </section>
+        )}
 
         <section className="actions">
-          <button className="primary" onClick={purchase} disabled={busy || restoring}>
+          <button
+            className="primary"
+            onClick={purchase}
+            disabled={busy || restoring || !pricesReady}
+          >
             {busy ? "Processing..." : "Start Subscription"}
           </button>
-          <button className="secondary" onClick={restore} disabled={busy || restoring}>
+          <button
+            className="secondary"
+            onClick={restore}
+            disabled={busy || restoring}
+          >
             {restoring ? "Restoring..." : "Restore Purchases"}
           </button>
         </section>
 
         <section className="utility">
-          <button className="ghost" onClick={() => loadPrices()} disabled={busy || restoring || pricesLoading}>
+          <button
+            className="ghost"
+            onClick={() => loadPrices()}
+            disabled={busy || restoring || pricesLoading}
+          >
             {pricesLoading ? "Loading prices..." : "Refresh Prices"}
           </button>
-          <button className="ghost" onClick={() => refreshStatus(true)} disabled={busy || restoring}>
+          <button
+            className="ghost"
+            onClick={() => refreshStatus(true)}
+            disabled={busy || restoring}
+          >
             Refresh Subscription Status
           </button>
           {!env.inCapacitor && (
-            <button className="ghost" onClick={() => setWebMockMode(!mockMode)} disabled={busy || restoring}>
+            <button
+              className="ghost"
+              onClick={() => setWebMockMode(!mockMode)}
+              disabled={busy || restoring}
+            >
               Web Mock Billing: {mockMode ? "On" : "Off"}
             </button>
           )}
           {!env.inCapacitor && (
-            <button className="ghost" onClick={clearMockSubscription} disabled={busy || restoring}>
+            <button
+              className="ghost"
+              onClick={clearMockSubscription}
+              disabled={busy || restoring}
+            >
               Clear Mock Subscription
             </button>
           )}
@@ -287,12 +413,21 @@ export default function App() {
 
         <footer className="footer">
           <p className="metaLine">
-            Platform: {env.platform} {env.inCapacitor ? "native" : "web"} {isAuthenticated ? " | Logged in" : " | Guest"}
+            Platform: {env.platform} {env.inCapacitor ? "native" : "web"}{" "}
+            {isAuthenticated ? " | Logged in" : " | Guest"}
           </p>
-          <button className="linkButton" onClick={copyDiagnosticsForSupport} disabled={busy || restoring}>
+          <button
+            className="linkButton"
+            onClick={copyDiagnosticsForSupport}
+            disabled={busy || restoring}
+          >
             Copy diagnostics for support
           </button>
-          {copiedSupport && <p className="copied">Copied. Paste this to your developer/support thread.</p>}
+          {copiedSupport && (
+            <p className="copied">
+              Copied. Paste this to your developer/support thread.
+            </p>
+          )}
         </footer>
       </div>
     </main>
